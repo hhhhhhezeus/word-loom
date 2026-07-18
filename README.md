@@ -4,7 +4,7 @@
 
 ## 在线使用
 
-[打开拾词 Word Loom](https://hhhhhhhezeus.github.io/word-loom/)
+[打开拾词 Word Loom](https://hhhhhhezeus.github.io/word-loom/)
 
 无需注册。单词数据保存在当前浏览器的 `localStorage` 中，不会上传到服务器。
 
