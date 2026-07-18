@@ -82,6 +82,12 @@ export default function Home() {
   const [filter, setFilter] = useState("全部单词");
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState("");
+  const [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewIndex, setReviewIndex] = useState(0);
+  const [revealed, setRevealed] = useState(false);
 
   useEffect(() => {
     const saved = localStorage.getItem("wordloom-words");
@@ -109,19 +115,17 @@ export default function Home() {
     const pending = fallbackData(original, lemma);
     setAnalysis(pending);
     try {
-      const response = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(lemma)}`);
+      const response = await fetch(`/api/word?word=${encodeURIComponent(lemma)}`);
       if (!response.ok) throw new Error("not found");
       const data = await response.json();
-      const entry = data[0];
-      const sense = entry.meanings?.[0];
-      const detail = sense?.definitions?.[0];
       setAnalysis({
         ...pending,
-        phonetic: entry.phonetic || entry.phonetics?.find((item: { text?: string }) => item.text)?.text || "/—/",
-        part: `${sense?.partOfSpeech || "word"} · 词性`,
-        meaning: detail?.definition || "暂未找到释义",
-        definition: detail?.definition || "No definition available yet.",
-        example: detail?.example || pending.example,
+        phonetic: data.phonetic || "/—/",
+        part: data.part || "word · 单词",
+        meaning: data.meaning || "暂未找到释义",
+        definition: data.definition || "No definition available yet.",
+        example: data.example || pending.example,
+        tag: data.tag || "日常积累",
       });
     } catch {
       setAnalysis({ ...pending, phonetic: "/—/", meaning: "暂未收录，可稍后补充中文释义" });
@@ -140,6 +144,36 @@ export default function Home() {
     setTimeout(() => setToast(""), 2200);
   }
 
+  function updateLevel(id: string) {
+    setWords((current) => current.map((word) => word.id === id ? { ...word, level: word.level === "mastered" ? "learning" : "mastered" } : word));
+  }
+
+  function removeWord(id: string) {
+    setWords((current) => current.filter((word) => word.id !== id));
+    setToast("已从词库移除");
+    setTimeout(() => setToast(""), 1800);
+  }
+
+  function openReview() {
+    if (!words.length) return;
+    setReviewIndex(0);
+    setRevealed(false);
+    setReviewOpen(true);
+  }
+
+  function nextReview(mastered = false) {
+    const currentWord = words[reviewIndex];
+    if (mastered && currentWord) setWords((current) => current.map((word) => word.id === currentWord.id ? { ...word, level: "mastered" } : word));
+    if (reviewIndex >= words.length - 1) {
+      setReviewOpen(false);
+      setToast("今日复习完成，做得好！");
+      setTimeout(() => setToast(""), 2200);
+    } else {
+      setReviewIndex((value) => value + 1);
+      setRevealed(false);
+    }
+  }
+
   function speak(word: string) {
     if ("speechSynthesis" in window) {
       speechSynthesis.cancel();
@@ -148,16 +182,32 @@ export default function Home() {
   }
 
   const filtered = useMemo(() => {
-    if (filter === "待复习") return words.filter((word) => word.level !== "mastered");
-    if (filter === "已掌握") return words.filter((word) => word.level === "mastered");
-    return words;
-  }, [filter, words]);
+    let result = words;
+    if (filter === "待复习") result = result.filter((word) => word.level !== "mastered");
+    if (filter === "已掌握") result = result.filter((word) => word.level === "mastered");
+    if (query.trim()) result = result.filter((word) => `${word.lemma} ${word.meaning} ${word.tag}`.toLowerCase().includes(query.trim().toLowerCase()));
+    return result;
+  }, [filter, words, query]);
 
   const reviewed = words.filter((word) => word.level === "mastered").length;
 
   return (
     <main className="app-shell">
       {toast && <div className="toast" role="status">✓ {toast}</div>}
+      {reviewOpen && words[reviewIndex] && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="单词复习">
+          <div className="review-modal paper-card">
+            <button className="modal-close" onClick={() => setReviewOpen(false)} aria-label="关闭">×</button>
+            <div className="review-progress"><span>今日复习</span><b>{reviewIndex + 1} / {words.length}</b></div>
+            <div className="progress-track"><i style={{ width: `${((reviewIndex + 1) / words.length) * 100}%` }} /></div>
+            <small>{revealed ? "你记对了吗？" : "看到这个词，你想起它的意思了吗？"}</small>
+            <h2>{words[reviewIndex].lemma}</h2>
+            <button className="modal-sound" onClick={() => speak(words[reviewIndex].lemma)}>))) {words[reviewIndex].phonetic}</button>
+            {revealed ? <div className="review-answer"><h3>{words[reviewIndex].meaning}</h3><p>{words[reviewIndex].example}</p></div> : <button className="reveal-btn" onClick={() => setRevealed(true)}>显示答案</button>}
+            {revealed && <div className="review-actions"><button onClick={() => nextReview(false)}>还不熟</button><button onClick={() => nextReview(true)}>记住了 ✓</button></div>}
+          </div>
+        </div>
+      )}
       <header className="topbar">
         <a className="brand" href="#top" aria-label="拾词首页">
           <span className="brand-mark">拾</span>
@@ -177,8 +227,10 @@ export default function Home() {
           <h1>随手拾起，<br />让每个单词<span>留下来。</span></h1>
           <p>复制一个刚刚遇见的单词，剩下的整理工作交给拾词。</p>
         </div>
-        <div className="date-note"><b>JUL</b><strong>18</strong><span>今日已收录<br /><em>{Math.max(words.length - 2, 1)} 个新词</em></span></div>
+        <div className="date-note"><b>TODAY</b><strong>{words.length}</strong><span>你的词库<br /><em>{words.filter((word) => word.level !== "mastered").length} 个待复习</em></span></div>
       </section>
+
+      <section className="trust-strip" aria-label="产品特点"><span>✦ 自动还原单词原形</span><span>✦ 中英双语释义</span><span>✦ 浏览器本地保存</span><span>✦ 无需注册即可使用</span></section>
 
       <section className="collector-grid">
         <div className="input-card paper-card">
@@ -193,6 +245,7 @@ export default function Home() {
             <button className="analyze-btn" type="submit" disabled={loading || !input.trim()}>
               <span>{loading ? "正在整理…" : "智能整理"}</span><b>→</b>
             </button>
+            <div className="quick-words"><span>试一试</span>{["children", "written", "beautiful", "journeys"].map((word) => <button type="button" key={word} onClick={() => setInput(word)}>{word}</button>)}</div>
           </form>
           <div className="tip"><span>✦</span><p><b>小提示</b>你可以直接粘贴 <i>libraries</i>、<i>exploring</i>，拾词会自动还原原形。</p></div>
         </div>
@@ -205,9 +258,9 @@ export default function Home() {
             <button className="sound" onClick={() => speak(analysis.lemma)} aria-label={`朗读 ${analysis.lemma}`}>)))</button>
           </div>
           <span className="part-badge">{analysis.part}</span>
-          <div className="meaning-block"><small>核心释义</small><h3>{analysis.meaning}</h3><p>{analysis.definition}</p></div>
-          <blockquote>“{analysis.example}”<small>例句 · Example</small></blockquote>
-          <div className="result-footer"><span>⌁ {analysis.tag}</span><button onClick={saveWord}>＋ 收入词库</button></div>
+          <div className="meaning-block"><small>核心释义</small>{editing ? <textarea aria-label="编辑释义" value={analysis.meaning} onChange={(e) => setAnalysis({ ...analysis, meaning: e.target.value })} /> : <h3>{analysis.meaning}</h3>}<p>{analysis.definition}</p></div>
+          {editing ? <textarea className="example-editor" aria-label="编辑例句" value={analysis.example} onChange={(e) => setAnalysis({ ...analysis, example: e.target.value })} /> : <blockquote>“{analysis.example}”<small>例句 · Example</small></blockquote>}
+          <div className="result-footer"><span>⌁ {analysis.tag}</span><div><button onClick={() => setEditing(!editing)}>{editing ? "完成编辑" : "✎ 编辑"}</button><button className="save-word" onClick={saveWord}>＋ 收入词库</button></div></div>
         </article>
       </section>
 
@@ -218,7 +271,8 @@ export default function Home() {
         </div>
         <div className="filter-row" role="group" aria-label="筛选单词">
           {["全部单词", "待复习", "已掌握"].map((name) => <button key={name} className={filter === name ? "selected" : ""} onClick={() => setFilter(name)}>{name}{name === "全部单词" && ` ${words.length}`}</button>)}
-          <button className="search-btn" aria-label="搜索词库">⌕</button>
+          {searching && <input className="library-search" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus placeholder="搜索单词、释义或分类" aria-label="搜索词库" />}
+          <button className="search-btn" onClick={() => { setSearching(!searching); if (searching) setQuery(""); }} aria-label="搜索词库">{searching ? "×" : "⌕"}</button>
         </div>
         <div className="word-list">
           {filtered.map((word, index) => (
@@ -227,8 +281,9 @@ export default function Home() {
               <div className="word-main"><small>{String(index + 1).padStart(2, "0")}</small><div><h3>{word.lemma}</h3><p>{word.phonetic} · {word.part.split(" · ")[0]}</p></div></div>
               <div className="row-meaning"><b>{word.meaning}</b><span>原词：{word.original}</span></div>
               <span className="tag">{word.tag}</span>
+              <button className={`master-btn ${word.level === "mastered" ? "done" : ""}`} onClick={() => updateLevel(word.id)} aria-label={word.level === "mastered" ? "标记为学习中" : "标记为已掌握"}>✓</button>
               <button className="row-sound" onClick={() => speak(word.lemma)} aria-label={`朗读 ${word.lemma}`}>)))</button>
-              <button className="more" aria-label="更多操作">•••</button>
+              <button className="delete-btn" onClick={() => removeWord(word.id)} aria-label={`删除 ${word.lemma}`}>×</button>
             </article>
           ))}
           {filtered.length === 0 && <div className="empty">这里还没有单词，去拾起一个吧。</div>}
@@ -237,7 +292,7 @@ export default function Home() {
 
       <section className="review-banner" id="review">
         <div className="review-icon">↻</div><div><span>DAILY REVIEW</span><h2>今天还有 {Math.max(words.filter((w) => w.level !== "mastered").length, 0)} 个单词等待复习</h2><p>每天花 5 分钟，让记忆的线织得更牢。</p></div>
-        <button onClick={() => setToast("复习卡片已经准备好")}>开始今日复习 <b>→</b></button>
+        <button onClick={openReview}>开始今日复习 <b>→</b></button>
       </section>
       <footer><span>拾词 WORD LOOM</span><p>把偶遇的单词，织成自己的语言。</p><small>每一次遇见，都值得被记住 ✦</small></footer>
     </main>
