@@ -31,6 +31,15 @@ const wordBook: Record<string, Omit<WordData, "id" | "original" | "level">> = {
   inspire: { lemma: "inspire", phonetic: "/ɪnˈspaɪər/", part: "verb · 动词", meaning: "启发；激励", definition: "to make someone feel that they want to do something", example: "Her story inspired me to keep learning.", tag: "阅读积累" },
 };
 
+const partNames: Record<string, string> = {
+  noun: "名词", verb: "动词", adjective: "形容词", adverb: "副词",
+  pronoun: "代词", preposition: "介词", conjunction: "连词", interjection: "感叹词",
+};
+
+const tagNames: Record<string, string> = {
+  noun: "名词积累", verb: "动作表达", adjective: "描述表达", adverb: "常用表达",
+};
+
 const initialWords: WordData[] = [
   { id: "w1", original: "exploring", ...wordBook.explore, level: "learning" },
   { id: "w2", original: "libraries", ...wordBook.library, level: "new" },
@@ -115,17 +124,35 @@ export default function Home() {
     const pending = fallbackData(original, lemma);
     setAnalysis(pending);
     try {
-      const response = await fetch(`/api/word?word=${encodeURIComponent(lemma)}`);
+      const response = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${encodeURIComponent(lemma)}`);
       if (!response.ok) throw new Error("not found");
-      const data = await response.json();
+      const entries = await response.json();
+      const entry = entries[0];
+      const sense = entry.meanings?.[0];
+      const detail = sense?.definitions?.[0];
+      const definition = detail?.definition || "No definition available yet.";
+      const part = sense?.partOfSpeech || "word";
+      let meaning = definition;
+
+      try {
+        const translation = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(definition)}&langpair=en|zh-CN`);
+        if (translation.ok) {
+          const translated = await translation.json();
+          if (translated.responseData?.translatedText) meaning = translated.responseData.translatedText;
+        }
+      } catch {
+        // The English definition remains useful when translation is unavailable.
+      }
+
       setAnalysis({
         ...pending,
-        phonetic: data.phonetic || "/—/",
-        part: data.part || "word · 单词",
-        meaning: data.meaning || "暂未找到释义",
-        definition: data.definition || "No definition available yet.",
-        example: data.example || pending.example,
-        tag: data.tag || "日常积累",
+        lemma: entry.word || lemma,
+        phonetic: entry.phonetic || entry.phonetics?.find((item: { text?: string }) => item.text)?.text || "/—/",
+        part: `${part} · ${partNames[part] || "词语"}`,
+        meaning,
+        definition,
+        example: detail?.example || `I learned how to use the word “${lemma}” today.`,
+        tag: tagNames[part] || "日常积累",
       });
     } catch {
       setAnalysis({ ...pending, phonetic: "/—/", meaning: "暂未收录，可稍后补充中文释义" });

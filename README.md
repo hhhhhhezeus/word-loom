@@ -1,98 +1,39 @@
-# vinext-starter
+# 拾词 Word Loom
 
-A clean full-stack starter running on
-[vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
-Drizzle support.
+一个帮助中文用户随手收集、自动整理和复习英语单词的网页应用。
 
-## Prerequisites
+## 在线使用
 
-- Node.js `>=22.13.0`
+[打开拾词 Word Loom](https://hhhhhhhezeus.github.io/word-loom/)
 
-## Quick Start
+无需注册。单词数据保存在当前浏览器的 `localStorage` 中，不会上传到服务器。
+
+## 功能
+
+- 自动将复数、过去式、`-ing` 等形式还原为原形
+- 自动查询音标、词性、中英文释义和例句
+- 浏览器内置英语发音
+- 按学习状态筛选、搜索、编辑与删除词条
+- 翻卡式每日复习，可标记“还不熟”或“已掌握”
+- 响应式界面，支持电脑、平板和手机
+
+## 本地开发
+
+需要 Node.js 22 或更高版本。
 
 ```bash
 npm install
 npm run dev
-npm run build
 ```
 
-This starter does not use `wrangler.jsonc`.
+打开 `http://localhost:3000` 即可使用。
 
-## Included Shape
+## 部署
 
-- edit site code under `app/`
-- `.openai/hosting.json` declares optional Sites D1 and R2 bindings
-- `vite.config.ts` simulates declared bindings for local development
-- `db/schema.ts` starts intentionally empty
-- `examples/d1/` contains an optional D1 example surface
-- `drizzle.config.ts` supports local migration generation when needed
+`.github/workflows/deploy-pages.yml` 会在代码推送到 `main` 分支后自动构建并发布到 GitHub Pages。
 
-## Workspace Auth Headers
+在线词典数据来自 [Free Dictionary API](https://dictionaryapi.dev/)，中文翻译使用 [MyMemory](https://mymemory.translated.net/)。第三方服务暂时不可用时，应用会显示可编辑的备用词条。
 
-OpenAI workspace sites can read the current user's email from
-`oai-authenticated-user-email`.
+## 技术栈
 
-SIWC-authenticated workspace sites may also receive
-`oai-authenticated-user-full-name` when the user's SIWC profile has a non-empty
-`name` claim. The full-name value is percent-encoded UTF-8 and is accompanied by
-`oai-authenticated-user-full-name-encoding: percent-encoded-utf-8`.
-
-Treat the full name as optional and fall back to email when it is absent:
-
-```tsx
-import { headers } from "next/headers";
-
-export default async function Home() {
-  const requestHeaders = await headers();
-  const email = requestHeaders.get("oai-authenticated-user-email");
-  const encodedFullName = requestHeaders.get("oai-authenticated-user-full-name");
-  const fullName =
-    encodedFullName &&
-    requestHeaders.get("oai-authenticated-user-full-name-encoding") ===
-      "percent-encoded-utf-8"
-      ? decodeURIComponent(encodedFullName)
-      : null;
-
-  const displayName = fullName ?? email;
-  // ...
-}
-```
-
-## Optional Dispatch-Owned ChatGPT Sign-In
-
-Import the ready-to-use helpers from `app/chatgpt-auth.ts` when the site needs
-optional or required ChatGPT sign-in:
-
-- Use `getChatGPTUser()` for optional signed-in UI.
-- Use `requireChatGPTUser(returnTo)` for server-rendered pages that should send
-  anonymous visitors through Sign in with ChatGPT.
-- Use `chatGPTSignInPath(returnTo)` and `chatGPTSignOutPath(returnTo)` for
-  browser links or actions.
-- Pass a same-origin relative `returnTo` path for the destination after sign-in
-  or sign-out. The helper validates and safely encodes it.
-- Mark protected pages with `export const dynamic = "force-dynamic"` because
-  they depend on per-request identity headers.
-
-Dispatch owns `/signin-with-chatgpt`, `/signout-with-chatgpt`, `/callback`, the
-OAuth cookies, and identity header injection. Do not implement app routes for
-those reserved paths. Routes that do not import and call the helper remain
-anonymous-compatible.
-
-SIWC establishes identity only; it does not prove workspace membership. Use the
-Sites hosting platform's access policy controls for workspace-wide restrictions,
-or enforce explicit server-side membership or allowlist checks.
-
-Use SIWC for account pages, user-specific dashboards, saved records, and write
-actions tied to the current ChatGPT user. Leave public content anonymous.
-
-## Useful Commands
-
-- `npm run dev`: start local development
-- `npm run build`: verify the vinext build output
-- `npm test`: build the starter and verify its rendered loading skeleton
-- `npm run db:generate`: generate Drizzle migrations after schema changes
-
-## Learn More
-
-- [vinext Documentation](https://github.com/cloudflare/vinext)
-- [Drizzle D1 Guide](https://orm.drizzle.team/docs/get-started/d1-new)
+Next.js 16、React 19、TypeScript、GitHub Actions、GitHub Pages。
