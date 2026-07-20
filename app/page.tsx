@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { CSSProperties, FormEvent, useEffect, useMemo, useState } from "react";
 
 type WordData = {
   id: string;
@@ -14,6 +14,8 @@ type WordData = {
   tag: string;
   level: "new" | "learning" | "mastered";
 };
+
+type ActivityStore = { dates: string[] };
 
 const irregular: Record<string, string> = {
   children: "child", men: "man", women: "woman", feet: "foot", teeth: "tooth",
@@ -45,6 +47,25 @@ const initialWords: WordData[] = [
   { id: "w2", original: "libraries", ...wordBook.library, level: "new" },
   { id: "w3", original: "inspired", ...wordBook.inspire, level: "mastered" },
 ];
+
+const wordsStorageKey = "wordloom-words";
+const activityStorageKey = "wordloom-activity";
+
+function getLocalDate(date = new Date()) {
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+}
+
+function countStreak(dates: string[]) {
+  const days = new Set(dates);
+  const cursor = new Date();
+  let streak = 0;
+  while (days.has(getLocalDate(cursor))) {
+    streak += 1;
+    cursor.setDate(cursor.getDate() - 1);
+  }
+  return streak;
+}
 
 function toLemma(value: string) {
   const word = value.toLowerCase().trim().replace(/[^a-z'-]/g, "");
@@ -97,15 +118,40 @@ export default function Home() {
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewIndex, setReviewIndex] = useState(0);
   const [revealed, setRevealed] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
+  const [activity, setActivity] = useState<ActivityStore>({ dates: [] });
 
   useEffect(() => {
-    const saved = localStorage.getItem("wordloom-words");
-    if (saved) setWords(JSON.parse(saved));
+    try {
+      const savedWords = localStorage.getItem(wordsStorageKey);
+      const savedActivity = localStorage.getItem(activityStorageKey);
+      if (savedWords) {
+        const parsedWords = JSON.parse(savedWords);
+        if (Array.isArray(parsedWords)) setWords(parsedWords);
+      }
+      if (savedActivity) {
+        const parsedActivity = JSON.parse(savedActivity);
+        if (Array.isArray(parsedActivity?.dates)) setActivity({ dates: parsedActivity.dates });
+      }
+    } catch {
+      // A damaged local cache should never prevent the word book from opening.
+    } finally {
+      setHydrated(true);
+    }
   }, []);
 
   useEffect(() => {
-    localStorage.setItem("wordloom-words", JSON.stringify(words));
-  }, [words]);
+    if (hydrated) localStorage.setItem(wordsStorageKey, JSON.stringify(words));
+  }, [words, hydrated]);
+
+  useEffect(() => {
+    if (hydrated) localStorage.setItem(activityStorageKey, JSON.stringify(activity));
+  }, [activity, hydrated]);
+
+  function recordActivity() {
+    const today = getLocalDate();
+    setActivity((current) => current.dates.includes(today) ? current : { dates: [...current.dates, today].slice(-365) });
+  }
 
   async function analyze(e?: FormEvent) {
     e?.preventDefault();
@@ -166,6 +212,7 @@ export default function Home() {
       setToast("这个单词已经在词库里啦");
     } else {
       setWords((current) => [{ ...analysis, id: `${Date.now()}-${analysis.lemma}` }, ...current]);
+      recordActivity();
       setToast(`已把 ${analysis.lemma} 收进词库`);
     }
     setTimeout(() => setToast(""), 2200);
@@ -173,6 +220,7 @@ export default function Home() {
 
   function updateLevel(id: string) {
     setWords((current) => current.map((word) => word.id === id ? { ...word, level: word.level === "mastered" ? "learning" : "mastered" } : word));
+    recordActivity();
   }
 
   function removeWord(id: string) {
@@ -183,6 +231,7 @@ export default function Home() {
 
   function openReview() {
     if (!words.length) return;
+    recordActivity();
     setReviewIndex(0);
     setRevealed(false);
     setReviewOpen(true);
@@ -217,6 +266,7 @@ export default function Home() {
   }, [filter, words, query]);
 
   const reviewed = words.filter((word) => word.level === "mastered").length;
+  const streak = countStreak(activity.dates);
 
   return (
     <main className="app-shell">
@@ -245,7 +295,7 @@ export default function Home() {
           <a href="#wordbook">词库</a>
           <a href="#review">复习</a>
         </nav>
-        <button className="streak" onClick={() => setToast("连续学习 12 天，真棒！")}>🔥 <b>12</b> 天</button>
+        <button className="streak" onClick={() => setToast(streak ? `已连续学习 ${streak} 天` : "完成一次收词或复习，即可点亮今天的连续学习")}>🔥 <b>{streak}</b> 天</button>
       </header>
 
       <section className="hero" id="collect">
@@ -277,7 +327,7 @@ export default function Home() {
           <div className="tip"><span>✦</span><p><b>小提示</b>你可以直接粘贴 <i>libraries</i>、<i>exploring</i>，拾词会自动还原原形。</p></div>
         </div>
 
-        <article className={`result-card paper-card ${loading ? "is-loading" : ""}`} aria-live="polite">
+        <article key={analysis.id} className={`result-card paper-card ${loading ? "is-loading" : ""}`} aria-live="polite">
           <div className="card-label"><span>02</span> 智能整理结果</div>
           <div className="original-line">你输入了 <del>{analysis.original}</del><span>已还原原形 ✓</span></div>
           <div className="word-heading">
@@ -303,7 +353,7 @@ export default function Home() {
         </div>
         <div className="word-list">
           {filtered.map((word, index) => (
-            <article className="word-row" key={word.id}>
+            <article className="word-row" key={word.id} style={{ "--row-delay": `${Math.min(index, 8) * 45}ms` } as CSSProperties}>
               <span className={`level-dot ${word.level}`} />
               <div className="word-main"><small>{String(index + 1).padStart(2, "0")}</small><div><h3>{word.lemma}</h3><p>{word.phonetic} · {word.part.split(" · ")[0]}</p></div></div>
               <div className="row-meaning"><b>{word.meaning}</b><span>原词：{word.original}</span></div>
