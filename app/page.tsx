@@ -1,6 +1,6 @@
 "use client";
 
-import { CSSProperties, FormEvent, useEffect, useMemo, useState } from "react";
+import { ChangeEvent, CSSProperties, FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 type WordData = {
   id: string;
@@ -14,6 +14,10 @@ type WordData = {
   tag: string;
   level: "new" | "learning" | "mastered";
   lastReviewed?: string;
+  favorite?: boolean;
+  reviewStage?: number;
+  nextReviewOn?: string;
+  addedAt?: string;
 };
 
 type ActivityStore = { dates: string[] };
@@ -53,6 +57,12 @@ const activityStorageKey = "wordloom-activity";
 function getLocalDate(date = new Date()) {
   const offset = date.getTimezoneOffset() * 60_000;
   return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+}
+
+function addDays(days: number) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return getLocalDate(date);
 }
 
 function countStreak(dates: string[]) {
@@ -141,6 +151,7 @@ export default function Home() {
   const [hydrated, setHydrated] = useState(false);
   const [activity, setActivity] = useState<ActivityStore>({ dates: [] });
   const [activeSection, setActiveSection] = useState("collect");
+  const importRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     try {
@@ -260,20 +271,76 @@ export default function Home() {
   }
 
   function saveWord() {
-    if (words.some((word) => word.lemma === analysis.lemma)) {
-      setToast("这个单词已经在词库里啦");
+    const existing = words.find((word) => word.lemma === analysis.lemma);
+    let nextWords: WordData[];
+    if (existing) {
+      nextWords = words.map((word) => word.id === existing.id ? { ...analysis, id: existing.id, level: existing.level, favorite: existing.favorite, reviewStage: existing.reviewStage, nextReviewOn: existing.nextReviewOn, lastReviewed: existing.lastReviewed, addedAt: existing.addedAt } : word);
+      setToast(`已更新 ${analysis.lemma}`);
     } else {
-      const nextWords = [{ ...analysis, id: `${Date.now()}-${analysis.lemma}` }, ...words];
-      setWords(nextWords);
-      persistLocal(wordsStorageKey, nextWords);
+      nextWords = [{ ...analysis, id: `${Date.now()}-${analysis.lemma}`, addedAt: new Date().toISOString(), reviewStage: 0, nextReviewOn: getLocalDate() }, ...words];
       recordActivity();
       setToast(`已把 ${analysis.lemma} 收进词库`);
     }
+    setWords(nextWords);
+    persistLocal(wordsStorageKey, nextWords);
     setTimeout(() => setToast(""), 2200);
   }
 
+  function toggleFavorite(id: string) {
+    const nextWords = words.map((word) => word.id === id ? { ...word, favorite: !word.favorite } : word);
+    setWords(nextWords);
+    persistLocal(wordsStorageKey, nextWords);
+  }
+
+  function editSavedWord(word: WordData) {
+    setAnalysis(word);
+    setInput(word.original);
+    setHasAnalyzed(true);
+    setEditing(true);
+    document.getElementById("collect")?.scrollIntoView({ behavior: "smooth" });
+  }
+
+  function exportBackup() {
+    const payload = { version: 1, exportedAt: new Date().toISOString(), words, activity };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `word-loom-backup-${getLocalDate()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setToast(`已导出 ${words.length} 个单词`);
+    setTimeout(() => setToast(""), 1800);
+  }
+
+  async function importBackup(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const backup = JSON.parse(await file.text());
+      if (!Array.isArray(backup.words)) throw new Error("invalid backup");
+      const validWords = backup.words.filter((word: WordData) => word && typeof word.id === "string" && typeof word.lemma === "string" && typeof word.meaning === "string");
+      const merged = new Map<string, WordData>();
+      validWords.forEach((word: WordData) => merged.set(word.lemma.toLowerCase(), word));
+      words.forEach((word) => merged.set(word.lemma.toLowerCase(), word));
+      const nextWords = Array.from(merged.values());
+      const importedDates = Array.isArray(backup.activity?.dates) ? backup.activity.dates.filter((date: unknown) => typeof date === "string") : [];
+      const nextActivity = { dates: Array.from(new Set([...activity.dates, ...importedDates])).slice(-365) };
+      setWords(nextWords);
+      setActivity(nextActivity);
+      persistLocal(wordsStorageKey, nextWords);
+      persistLocal(activityStorageKey, nextActivity);
+      setToast(`导入完成，词库现有 ${nextWords.length} 个单词`);
+    } catch {
+      setToast("备份文件无效，请选择拾词导出的 JSON 文件");
+    }
+    setTimeout(() => setToast(""), 2600);
+  }
+
   function updateLevel(id: string) {
-    const nextWords = words.map((word) => word.id === id ? { ...word, level: word.level === "mastered" ? "learning" as const : "mastered" as const } : word);
+    const nextWords = words.map((word) => word.id === id ? { ...word, level: word.level === "mastered" ? "learning" as const : "mastered" as const, reviewStage: word.level === "mastered" ? 0 : word.reviewStage, nextReviewOn: word.level === "mastered" ? getLocalDate() : word.nextReviewOn } : word);
     setWords(nextWords);
     persistLocal(wordsStorageKey, nextWords);
     recordActivity();
@@ -300,7 +367,8 @@ export default function Home() {
   }
 
   function openReview() {
-    const queue = words.filter((word) => word.level !== "mastered").map((word) => word.id);
+    const today = getLocalDate();
+    const queue = words.filter((word) => word.level !== "mastered" && (!word.nextReviewOn || word.nextReviewOn <= today)).map((word) => word.id);
     if (!queue.length) {
       setToast("待复习单词已经清空啦");
       setTimeout(() => setToast(""), 1800);
@@ -315,7 +383,12 @@ export default function Home() {
   function nextReview(mastered = false) {
     const currentId = reviewQueue[reviewIndex];
     const today = getLocalDate();
-    const nextWords = words.map((word) => word.id === currentId ? { ...word, level: mastered ? "mastered" as const : "learning" as const, lastReviewed: today } : word);
+    const nextWords = words.map((word) => {
+      if (word.id !== currentId) return word;
+      const nextStage = mastered ? Math.min((word.reviewStage || 0) + 1, 3) : 0;
+      const interval = mastered ? [1, 1, 3, 7][nextStage] : 1;
+      return { ...word, level: mastered && nextStage >= 3 ? "mastered" as const : "learning" as const, reviewStage: nextStage, nextReviewOn: addDays(interval), lastReviewed: today };
+    });
     setWords(nextWords);
     persistLocal(wordsStorageKey, nextWords);
     recordActivity();
@@ -338,8 +411,10 @@ export default function Home() {
 
   const filtered = useMemo(() => {
     let result = words;
-    if (filter === "待复习") result = result.filter((word) => word.level !== "mastered");
+    const today = getLocalDate();
+    if (filter === "今日待复习") result = result.filter((word) => word.level !== "mastered" && (!word.nextReviewOn || word.nextReviewOn <= today));
     if (filter === "已掌握") result = result.filter((word) => word.level === "mastered");
+    if (filter === "重点词") result = result.filter((word) => word.favorite);
     if (query.trim()) result = result.filter((word) => `${word.lemma} ${word.meaning} ${word.tag}`.toLowerCase().includes(query.trim().toLowerCase()));
     return result;
   }, [filter, words, query]);
@@ -348,6 +423,10 @@ export default function Home() {
   const streak = countStreak(activity.dates);
   const currentReview = words.find((word) => word.id === reviewQueue[reviewIndex]);
   const alreadySaved = hasAnalyzed && words.some((word) => word.lemma === analysis.lemma);
+  const dueWords = words.filter((word) => word.level !== "mastered" && (!word.nextReviewOn || word.nextReviewOn <= getLocalDate()));
+  const masteredCount = words.filter((word) => word.level === "mastered").length;
+  const favoriteCount = words.filter((word) => word.favorite).length;
+  const masteryRate = words.length ? Math.round((masteredCount / words.length) * 100) : 0;
 
   if (!hydrated) {
     return <main className="app-loading" aria-label="正在读取本地词库"><div className="loading-brand"><span className="brand-mark">拾</span><b>拾词</b></div><div className="loading-thread"><i /><i /><i /></div><p>正在打开你的本地词库…</p></main>;
@@ -360,13 +439,13 @@ export default function Home() {
         <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="单词复习" onMouseDown={(event) => { if (event.target === event.currentTarget) setReviewOpen(false); }}>
           <div className="review-modal paper-card">
             <button className="modal-close" onClick={() => setReviewOpen(false)} aria-label="关闭">×</button>
-            <div className="review-progress"><span>今日复习</span><b>{reviewIndex + 1} / {reviewQueue.length}</b></div>
+            <div className="review-progress"><span>今日复习 · 记忆阶段 {Math.min((currentReview.reviewStage || 0) + 1, 3)} / 3</span><b>{reviewIndex + 1} / {reviewQueue.length}</b></div>
             <div className="progress-track"><i style={{ width: `${((reviewIndex + 1) / reviewQueue.length) * 100}%` }} /></div>
             <small>{revealed ? "你记对了吗？" : "看到这个词，你想起它的意思了吗？"}</small>
             <h2>{currentReview.lemma}</h2>
             <button className="modal-sound" onClick={() => speak(currentReview.lemma)}>))) {currentReview.phonetic}</button>
             {revealed ? <div className="review-answer"><h3>{currentReview.meaning}</h3><p>{currentReview.example}</p></div> : <button className="reveal-btn" autoFocus onClick={() => setRevealed(true)}>显示答案</button>}
-            {revealed && <div className="review-actions"><button onClick={() => nextReview(false)}>还不熟</button><button onClick={() => nextReview(true)}>记住了 ✓</button></div>}
+            {revealed && <div className="review-actions"><button onClick={() => nextReview(false)}>还不熟 · 明天再练</button><button onClick={() => nextReview(true)}>记住了 · {["明天", "明天", "3 天后", "7 天后"][Math.min((currentReview.reviewStage || 0) + 1, 3)]} ✓</button></div>}
           </div>
         </div>
       )}
@@ -389,7 +468,7 @@ export default function Home() {
           <h1>随手拾起，<br />让每个单词<span>留下来。</span></h1>
           <p>复制一个刚刚遇见的单词，剩下的整理工作交给拾词。</p>
         </div>
-        <div className="date-note"><b>TODAY</b><strong>{words.length}</strong><span>你的词库<br /><em>{words.filter((word) => word.level !== "mastered").length} 个待复习</em></span></div>
+        <div className="date-note"><b>TODAY</b><strong>{words.length}</strong><span>你的词库<br /><em>{dueWords.length} 个今日待复习</em></span></div>
       </section>
 
       <section className="trust-strip" aria-label="产品特点"><span>✦ 自动还原单词原形</span><span>✦ 中英双语释义</span><span>✦ 浏览器本地保存</span><span>✦ 无需注册即可使用</span></section>
@@ -423,7 +502,7 @@ export default function Home() {
           <span className="part-badge">{analysis.part}</span>
           <div className="meaning-block"><small>核心释义</small>{editing ? <textarea aria-label="编辑释义" value={analysis.meaning} onChange={(e) => setAnalysis({ ...analysis, meaning: e.target.value })} /> : <h3>{analysis.meaning}</h3>}<p>{analysis.definition}</p></div>
           {editing ? <textarea className="example-editor" aria-label="编辑例句" value={analysis.example} onChange={(e) => setAnalysis({ ...analysis, example: e.target.value })} /> : <blockquote>“{analysis.example}”<small>例句 · Example</small></blockquote>}
-          <div className="result-footer"><span>⌁ {analysis.tag}</span><div><button onClick={() => setEditing(!editing)}>{editing ? "完成编辑" : "✎ 编辑"}</button><button className="save-word" onClick={saveWord} disabled={loading || alreadySaved}>{alreadySaved ? "✓ 已在词库" : "＋ 收入词库"}</button></div></div>
+          <div className="result-footer"><span>⌁ {analysis.tag}</span><div><button onClick={() => setEditing(!editing)}>{editing ? "完成编辑" : "✎ 编辑"}</button><button className="save-word" onClick={saveWord} disabled={loading}>{alreadySaved ? "✓ 保存修改" : "＋ 收入词库"}</button></div></div>
           </>}
         </article>
       </section>
@@ -433,8 +512,18 @@ export default function Home() {
           <div><span className="eyebrow"><i /> MY WORD GARDEN</span><h2>我的词库</h2></div>
           <p>已经拾起 <b>{words.length}</b> 个单词 · 今天复习 <b>{reviewed}</b> 个</p>
         </div>
+        <div className="stats-grid" aria-label="学习统计">
+          <div><span>今日待复习</span><b>{dueWords.length}</b><small>Due today</small></div>
+          <div><span>已经掌握</span><b>{masteredCount}</b><small>Mastered</small></div>
+          <div><span>重点词</span><b>{favoriteCount}</b><small>Favorites</small></div>
+          <div className="mastery-stat"><span>掌握进度</span><b>{masteryRate}%</b><i><em style={{ width: `${masteryRate}%` }} /></i></div>
+        </div>
+        <div className="data-toolbar">
+          <p>数据仅保存在当前浏览器，建议定期备份。</p>
+          <div><button onClick={exportBackup}>⇩ 导出备份</button><button onClick={() => importRef.current?.click()}>⇧ 导入备份</button><input ref={importRef} type="file" accept="application/json,.json" onChange={importBackup} aria-label="选择拾词备份文件" /></div>
+        </div>
         <div className="filter-row" role="group" aria-label="筛选单词">
-          {["全部单词", "待复习", "已掌握"].map((name) => <button key={name} className={filter === name ? "selected" : ""} onClick={() => setFilter(name)}>{name}{name === "全部单词" && ` ${words.length}`}</button>)}
+          {["全部单词", "今日待复习", "重点词", "已掌握"].map((name) => <button key={name} className={filter === name ? "selected" : ""} onClick={() => setFilter(name)}>{name}{name === "全部单词" && ` ${words.length}`}</button>)}
           {searching && <input className="library-search" value={query} onChange={(e) => setQuery(e.target.value)} autoFocus placeholder="搜索单词、释义或分类" aria-label="搜索词库" />}
           <button className="search-btn" onClick={() => { setSearching(!searching); if (searching) setQuery(""); }} aria-label="搜索词库">{searching ? "×" : "⌕"}</button>
         </div>
@@ -442,9 +531,10 @@ export default function Home() {
           {filtered.map((word, index) => (
             <article className="word-row" key={word.id} style={{ "--row-delay": `${Math.min(index, 8) * 45}ms` } as CSSProperties}>
               <span className={`level-dot ${word.level}`} />
-              <div className="word-main"><small>{String(index + 1).padStart(2, "0")}</small><div><h3>{word.lemma}</h3><p>{word.phonetic} · {word.part.split(" · ")[0]}</p></div></div>
-              <div className="row-meaning"><b>{word.meaning}</b><span>原词：{word.original}</span></div>
+              <div className="word-main"><small>{String(index + 1).padStart(2, "0")}</small><button className="word-edit" onClick={() => editSavedWord(word)} aria-label={`编辑 ${word.lemma}`}><h3>{word.lemma}</h3><p>{word.phonetic} · {word.part.split(" · ")[0]}</p></button></div>
+              <div className="row-meaning"><b>{word.meaning}</b><span>原词：{word.original} · {word.level === "mastered" ? "已掌握" : `下次复习：${word.nextReviewOn || "今天"}`}</span></div>
               <span className="tag">{word.tag}</span>
+              <button className={`favorite-btn ${word.favorite ? "done" : ""}`} onClick={() => toggleFavorite(word.id)} aria-label={word.favorite ? `取消重点 ${word.lemma}` : `标为重点 ${word.lemma}`}>{word.favorite ? "★" : "☆"}</button>
               <button className={`master-btn ${word.level === "mastered" ? "done" : ""}`} onClick={() => updateLevel(word.id)} aria-label={word.level === "mastered" ? "标记为学习中" : "标记为已掌握"}>✓</button>
               <button className="row-sound" onClick={() => speak(word.lemma)} aria-label={`朗读 ${word.lemma}`}>)))</button>
               <button className="delete-btn" onClick={() => removeWord(word.id)} aria-label={`删除 ${word.lemma}`}>×</button>
@@ -455,8 +545,8 @@ export default function Home() {
       </section>
 
       <section className="review-banner" id="review">
-        <div className="review-icon">↻</div><div><span>DAILY REVIEW</span><h2>今天还有 {Math.max(words.filter((w) => w.level !== "mastered").length, 0)} 个单词等待复习</h2><p>每天花 5 分钟，让记忆的线织得更牢。</p></div>
-        <button onClick={openReview} disabled={!words.some((word) => word.level !== "mastered")}>开始今日复习 <b>→</b></button>
+        <div className="review-icon">↻</div><div><span>SPACED REVIEW</span><h2>今天还有 {dueWords.length} 个单词等待复习</h2><p>连续记住三次，按 1、3、7 天逐步拉开复习间隔。</p></div>
+        <button onClick={openReview} disabled={!dueWords.length}>开始今日复习 <b>→</b></button>
       </section>
       <footer><span>拾词 WORD LOOM</span><p>把偶遇的单词，织成自己的语言。</p><small>每一次遇见，都值得被记住 ✦</small></footer>
     </main>
