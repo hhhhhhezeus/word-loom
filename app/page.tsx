@@ -13,6 +13,7 @@ type WordData = {
   example: string;
   tag: string;
   level: "new" | "learning" | "mastered";
+  lastReviewed?: string;
 };
 
 type ActivityStore = { dates: string[] };
@@ -22,6 +23,7 @@ const irregular: Record<string, string> = {
   mice: "mouse", geese: "goose", went: "go", gone: "go", better: "good",
   best: "good", worse: "bad", worst: "bad", ran: "run", written: "write",
   wrote: "write", spoken: "speak", spoke: "speak", bought: "buy", brought: "bring",
+  lying: "lie", dying: "die", tying: "tie", knives: "knife", leaves: "leaf",
 };
 
 const wordBook: Record<string, Omit<WordData, "id" | "original" | "level">> = {
@@ -42,11 +44,8 @@ const tagNames: Record<string, string> = {
   noun: "名词积累", verb: "动作表达", adjective: "描述表达", adverb: "常用表达",
 };
 
-const initialWords: WordData[] = [
-  { id: "w1", original: "exploring", ...wordBook.explore, level: "learning" },
-  { id: "w2", original: "libraries", ...wordBook.library, level: "new" },
-  { id: "w3", original: "inspired", ...wordBook.inspire, level: "mastered" },
-];
+const initialWords: WordData[] = [];
+const legacyDemoIds = new Set(["w1", "w2", "w3"]);
 
 const wordsStorageKey = "wordloom-words";
 const activityStorageKey = "wordloom-activity";
@@ -59,12 +58,28 @@ function getLocalDate(date = new Date()) {
 function countStreak(dates: string[]) {
   const days = new Set(dates);
   const cursor = new Date();
+  if (!days.has(getLocalDate(cursor))) cursor.setDate(cursor.getDate() - 1);
   let streak = 0;
   while (days.has(getLocalDate(cursor))) {
     streak += 1;
     cursor.setDate(cursor.getDate() - 1);
   }
   return streak;
+}
+
+function persistLocal(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Private browsing or disabled storage should not break the rest of the app.
+  }
+}
+
+function preferredPartFor(original: string) {
+  const knownVerbForms = new Set(["went", "gone", "ran", "written", "wrote", "spoken", "spoke", "bought", "brought"]);
+  if (knownVerbForms.has(original) || original.endsWith("ing") || original.endsWith("ed")) return "verb";
+  if (original.endsWith("ies") || (original.endsWith("s") && !original.endsWith("ss"))) return "noun";
+  return "";
 }
 
 function toLemma(value: string) {
@@ -85,6 +100,8 @@ function toLemma(value: string) {
     if (["inspir", "creat", "us", "mov"].includes(base)) base += "e";
     return base;
   }
+  if (word.endsWith("sses")) return word.slice(0, -2);
+  if (word.endsWith("uses") && !["buses", "gases"].includes(word)) return word.slice(0, -1);
   if (word.endsWith("es") && /(s|x|z|ch|sh)es$/.test(word)) return word.slice(0, -2);
   if (word.endsWith("s") && !word.endsWith("ss") && word.length > 3) return word.slice(0, -1);
   return word;
@@ -106,20 +123,24 @@ function fallbackData(original: string, lemma: string): WordData {
 }
 
 export default function Home() {
-  const [input, setInput] = useState("running");
+  const [input, setInput] = useState("");
   const [analysis, setAnalysis] = useState<WordData>({ id: "preview", original: "running", ...wordBook.run, level: "new" });
   const [words, setWords] = useState<WordData[]>(initialWords);
+  const [hasAnalyzed, setHasAnalyzed] = useState(false);
   const [filter, setFilter] = useState("全部单词");
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState("");
+  const [deletedWord, setDeletedWord] = useState<WordData | null>(null);
   const [query, setQuery] = useState("");
   const [searching, setSearching] = useState(false);
   const [editing, setEditing] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewIndex, setReviewIndex] = useState(0);
+  const [reviewQueue, setReviewQueue] = useState<string[]>([]);
   const [revealed, setRevealed] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [activity, setActivity] = useState<ActivityStore>({ dates: [] });
+  const [activeSection, setActiveSection] = useState("collect");
 
   useEffect(() => {
     try {
@@ -127,7 +148,7 @@ export default function Home() {
       const savedActivity = localStorage.getItem(activityStorageKey);
       if (savedWords) {
         const parsedWords = JSON.parse(savedWords);
-        if (Array.isArray(parsedWords)) setWords(parsedWords);
+        if (Array.isArray(parsedWords)) setWords(parsedWords.filter((word: WordData) => !legacyDemoIds.has(word.id)));
       }
       if (savedActivity) {
         const parsedActivity = JSON.parse(savedActivity);
@@ -148,23 +169,41 @@ export default function Home() {
     if (hydrated) localStorage.setItem(activityStorageKey, JSON.stringify(activity));
   }, [activity, hydrated]);
 
+  useEffect(() => {
+    const sections = ["collect", "wordbook", "review"].map((id) => document.getElementById(id)).filter(Boolean) as HTMLElement[];
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      if (visible?.target.id) setActiveSection(visible.target.id);
+    }, { rootMargin: "-25% 0px -60%", threshold: [0, 0.2, 0.6] });
+    sections.forEach((section) => observer.observe(section));
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!reviewOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setReviewOpen(false); };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [reviewOpen]);
+
   function recordActivity() {
     const today = getLocalDate();
-    setActivity((current) => current.dates.includes(today) ? current : { dates: [...current.dates, today].slice(-365) });
+    const nextActivity = activity.dates.includes(today) ? activity : { dates: [...activity.dates, today].slice(-365) };
+    setActivity(nextActivity);
+    persistLocal(activityStorageKey, nextActivity);
   }
 
-  async function analyze(e?: FormEvent) {
-    e?.preventDefault();
-    const original = input.trim().toLowerCase();
+  async function analyzeWord(value: string) {
+    const original = value.trim().toLowerCase();
     const lemma = toLemma(original);
     if (!lemma) return;
+    setHasAnalyzed(true);
+    setEditing(false);
     setLoading(true);
     const known = wordBook[lemma];
     if (known) {
-      setTimeout(() => {
-        setAnalysis({ id: `${Date.now()}-${lemma}`, original, ...known, level: "new" });
-        setLoading(false);
-      }, 420);
+      setAnalysis({ id: `${Date.now()}-${lemma}`, original, ...known, level: "new" });
+      setLoading(false);
       return;
     }
     const pending = fallbackData(original, lemma);
@@ -174,44 +213,59 @@ export default function Home() {
       if (!response.ok) throw new Error("not found");
       const entries = await response.json();
       const entry = entries[0];
-      const sense = entry.meanings?.[0];
+      const preferredPart = preferredPartFor(original);
+      const sense = entry.meanings?.find((item: { partOfSpeech?: string }) => item.partOfSpeech === preferredPart) || entry.meanings?.[0];
       const detail = sense?.definitions?.[0];
       const definition = detail?.definition || "No definition available yet.";
       const part = sense?.partOfSpeech || "word";
-      let meaning = definition;
+      const baseResult: WordData = {
+        ...pending,
+        lemma: entry.word || lemma,
+        phonetic: entry.phonetic || entry.phonetics?.find((item: { text?: string }) => item.text)?.text || "/—/",
+        part: `${part} · ${partNames[part] || "词语"}`,
+        meaning: definition,
+        definition,
+        example: detail?.example || `I learned how to use the word “${lemma}” today.`,
+        tag: tagNames[part] || "日常积累",
+      };
+      setAnalysis(baseResult);
+      setLoading(false);
 
       try {
         const translation = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(definition)}&langpair=en|zh-CN`);
         if (translation.ok) {
           const translated = await translation.json();
-          if (translated.responseData?.translatedText) meaning = translated.responseData.translatedText;
+          if (translated.responseData?.translatedText) {
+            const meaning = translated.responseData.translatedText;
+            setAnalysis({ ...baseResult, meaning });
+            setWords((current) => {
+              const nextWords = current.map((word) => word.lemma === baseResult.lemma && word.meaning === definition ? { ...word, meaning } : word);
+              persistLocal(wordsStorageKey, nextWords);
+              return nextWords;
+            });
+          }
         }
       } catch {
         // The English definition remains useful when translation is unavailable.
       }
-
-      setAnalysis({
-        ...pending,
-        lemma: entry.word || lemma,
-        phonetic: entry.phonetic || entry.phonetics?.find((item: { text?: string }) => item.text)?.text || "/—/",
-        part: `${part} · ${partNames[part] || "词语"}`,
-        meaning,
-        definition,
-        example: detail?.example || `I learned how to use the word “${lemma}” today.`,
-        tag: tagNames[part] || "日常积累",
-      });
     } catch {
       setAnalysis({ ...pending, phonetic: "/—/", meaning: "暂未收录，可稍后补充中文释义" });
-    } finally {
       setLoading(false);
     }
+  }
+
+  function analyze(e: FormEvent) {
+    e.preventDefault();
+    void analyzeWord(input);
   }
 
   function saveWord() {
     if (words.some((word) => word.lemma === analysis.lemma)) {
       setToast("这个单词已经在词库里啦");
     } else {
-      setWords((current) => [{ ...analysis, id: `${Date.now()}-${analysis.lemma}` }, ...current]);
+      const nextWords = [{ ...analysis, id: `${Date.now()}-${analysis.lemma}` }, ...words];
+      setWords(nextWords);
+      persistLocal(wordsStorageKey, nextWords);
       recordActivity();
       setToast(`已把 ${analysis.lemma} 收进词库`);
     }
@@ -219,28 +273,53 @@ export default function Home() {
   }
 
   function updateLevel(id: string) {
-    setWords((current) => current.map((word) => word.id === id ? { ...word, level: word.level === "mastered" ? "learning" : "mastered" } : word));
+    const nextWords = words.map((word) => word.id === id ? { ...word, level: word.level === "mastered" ? "learning" as const : "mastered" as const } : word);
+    setWords(nextWords);
+    persistLocal(wordsStorageKey, nextWords);
     recordActivity();
   }
 
   function removeWord(id: string) {
-    setWords((current) => current.filter((word) => word.id !== id));
-    setToast("已从词库移除");
-    setTimeout(() => setToast(""), 1800);
+    const removed = words.find((word) => word.id === id) || null;
+    const nextWords = words.filter((word) => word.id !== id);
+    setWords(nextWords);
+    persistLocal(wordsStorageKey, nextWords);
+    setDeletedWord(removed);
+    setToast(removed ? `已移除 ${removed.lemma}` : "已从词库移除");
+    setTimeout(() => { setToast(""); setDeletedWord(null); }, 4200);
+  }
+
+  function undoRemove() {
+    if (!deletedWord) return;
+    const nextWords = [deletedWord, ...words];
+    setWords(nextWords);
+    persistLocal(wordsStorageKey, nextWords);
+    setDeletedWord(null);
+    setToast(`已恢复 ${deletedWord.lemma}`);
+    setTimeout(() => setToast(""), 1600);
   }
 
   function openReview() {
-    if (!words.length) return;
-    recordActivity();
+    const queue = words.filter((word) => word.level !== "mastered").map((word) => word.id);
+    if (!queue.length) {
+      setToast("待复习单词已经清空啦");
+      setTimeout(() => setToast(""), 1800);
+      return;
+    }
+    setReviewQueue(queue);
     setReviewIndex(0);
     setRevealed(false);
     setReviewOpen(true);
   }
 
   function nextReview(mastered = false) {
-    const currentWord = words[reviewIndex];
-    if (mastered && currentWord) setWords((current) => current.map((word) => word.id === currentWord.id ? { ...word, level: "mastered" } : word));
-    if (reviewIndex >= words.length - 1) {
+    const currentId = reviewQueue[reviewIndex];
+    const today = getLocalDate();
+    const nextWords = words.map((word) => word.id === currentId ? { ...word, level: mastered ? "mastered" as const : "learning" as const, lastReviewed: today } : word);
+    setWords(nextWords);
+    persistLocal(wordsStorageKey, nextWords);
+    recordActivity();
+    if (reviewIndex >= reviewQueue.length - 1) {
       setReviewOpen(false);
       setToast("今日复习完成，做得好！");
       setTimeout(() => setToast(""), 2200);
@@ -265,22 +344,28 @@ export default function Home() {
     return result;
   }, [filter, words, query]);
 
-  const reviewed = words.filter((word) => word.level === "mastered").length;
+  const reviewed = words.filter((word) => word.lastReviewed === getLocalDate()).length;
   const streak = countStreak(activity.dates);
+  const currentReview = words.find((word) => word.id === reviewQueue[reviewIndex]);
+  const alreadySaved = hasAnalyzed && words.some((word) => word.lemma === analysis.lemma);
+
+  if (!hydrated) {
+    return <main className="app-loading" aria-label="正在读取本地词库"><div className="loading-brand"><span className="brand-mark">拾</span><b>拾词</b></div><div className="loading-thread"><i /><i /><i /></div><p>正在打开你的本地词库…</p></main>;
+  }
 
   return (
-    <main className="app-shell">
-      {toast && <div className="toast" role="status">✓ {toast}</div>}
-      {reviewOpen && words[reviewIndex] && (
-        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="单词复习">
+    <main className="app-shell" id="top">
+      {toast && <div className="toast" role="status">✓ {toast}{deletedWord && <button onClick={undoRemove}>撤销</button>}</div>}
+      {reviewOpen && currentReview && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-label="单词复习" onMouseDown={(event) => { if (event.target === event.currentTarget) setReviewOpen(false); }}>
           <div className="review-modal paper-card">
             <button className="modal-close" onClick={() => setReviewOpen(false)} aria-label="关闭">×</button>
-            <div className="review-progress"><span>今日复习</span><b>{reviewIndex + 1} / {words.length}</b></div>
-            <div className="progress-track"><i style={{ width: `${((reviewIndex + 1) / words.length) * 100}%` }} /></div>
+            <div className="review-progress"><span>今日复习</span><b>{reviewIndex + 1} / {reviewQueue.length}</b></div>
+            <div className="progress-track"><i style={{ width: `${((reviewIndex + 1) / reviewQueue.length) * 100}%` }} /></div>
             <small>{revealed ? "你记对了吗？" : "看到这个词，你想起它的意思了吗？"}</small>
-            <h2>{words[reviewIndex].lemma}</h2>
-            <button className="modal-sound" onClick={() => speak(words[reviewIndex].lemma)}>))) {words[reviewIndex].phonetic}</button>
-            {revealed ? <div className="review-answer"><h3>{words[reviewIndex].meaning}</h3><p>{words[reviewIndex].example}</p></div> : <button className="reveal-btn" onClick={() => setRevealed(true)}>显示答案</button>}
+            <h2>{currentReview.lemma}</h2>
+            <button className="modal-sound" onClick={() => speak(currentReview.lemma)}>))) {currentReview.phonetic}</button>
+            {revealed ? <div className="review-answer"><h3>{currentReview.meaning}</h3><p>{currentReview.example}</p></div> : <button className="reveal-btn" autoFocus onClick={() => setRevealed(true)}>显示答案</button>}
             {revealed && <div className="review-actions"><button onClick={() => nextReview(false)}>还不熟</button><button onClick={() => nextReview(true)}>记住了 ✓</button></div>}
           </div>
         </div>
@@ -291,9 +376,9 @@ export default function Home() {
           <span><b>拾词</b><small>Word Loom</small></span>
         </a>
         <nav aria-label="主导航">
-          <a className="active" href="#collect">收词</a>
-          <a href="#wordbook">词库</a>
-          <a href="#review">复习</a>
+          <a className={activeSection === "collect" ? "active" : ""} href="#collect">收词</a>
+          <a className={activeSection === "wordbook" ? "active" : ""} href="#wordbook">词库</a>
+          <a className={activeSection === "review" ? "active" : ""} href="#review">复习</a>
         </nav>
         <button className="streak" onClick={() => setToast(streak ? `已连续学习 ${streak} 天` : "完成一次收词或复习，即可点亮今天的连续学习")}>🔥 <b>{streak}</b> 天</button>
       </header>
@@ -322,14 +407,15 @@ export default function Home() {
             <button className="analyze-btn" type="submit" disabled={loading || !input.trim()}>
               <span>{loading ? "正在整理…" : "智能整理"}</span><b>→</b>
             </button>
-            <div className="quick-words"><span>试一试</span>{["children", "written", "beautiful", "journeys"].map((word) => <button type="button" key={word} onClick={() => setInput(word)}>{word}</button>)}</div>
+            <div className="quick-words"><span>试一试</span>{["children", "written", "beautiful", "journeys"].map((word) => <button type="button" key={word} onClick={() => { setInput(word); void analyzeWord(word); }}>{word}</button>)}</div>
           </form>
           <div className="tip"><span>✦</span><p><b>小提示</b>你可以直接粘贴 <i>libraries</i>、<i>exploring</i>，拾词会自动还原原形。</p></div>
         </div>
 
         <article key={analysis.id} className={`result-card paper-card ${loading ? "is-loading" : ""}`} aria-live="polite">
           <div className="card-label"><span>02</span> 智能整理结果</div>
-          <div className="original-line">你输入了 <del>{analysis.original}</del><span>已还原原形 ✓</span></div>
+          {!hasAnalyzed ? <div className="result-empty"><span>abc</span><h3>等待一个新单词</h3><p>输入后，这里会自动整理原形、音标、词性、释义与例句。</p></div> : <>
+          <div className="original-line">你输入了 <del>{analysis.original}</del>{analysis.original !== analysis.lemma && <span>已还原原形 ✓</span>}</div>
           <div className="word-heading">
             <div><h2>{analysis.lemma}</h2><p>{analysis.phonetic}</p></div>
             <button className="sound" onClick={() => speak(analysis.lemma)} aria-label={`朗读 ${analysis.lemma}`}>)))</button>
@@ -337,7 +423,8 @@ export default function Home() {
           <span className="part-badge">{analysis.part}</span>
           <div className="meaning-block"><small>核心释义</small>{editing ? <textarea aria-label="编辑释义" value={analysis.meaning} onChange={(e) => setAnalysis({ ...analysis, meaning: e.target.value })} /> : <h3>{analysis.meaning}</h3>}<p>{analysis.definition}</p></div>
           {editing ? <textarea className="example-editor" aria-label="编辑例句" value={analysis.example} onChange={(e) => setAnalysis({ ...analysis, example: e.target.value })} /> : <blockquote>“{analysis.example}”<small>例句 · Example</small></blockquote>}
-          <div className="result-footer"><span>⌁ {analysis.tag}</span><div><button onClick={() => setEditing(!editing)}>{editing ? "完成编辑" : "✎ 编辑"}</button><button className="save-word" onClick={saveWord}>＋ 收入词库</button></div></div>
+          <div className="result-footer"><span>⌁ {analysis.tag}</span><div><button onClick={() => setEditing(!editing)}>{editing ? "完成编辑" : "✎ 编辑"}</button><button className="save-word" onClick={saveWord} disabled={loading || alreadySaved}>{alreadySaved ? "✓ 已在词库" : "＋ 收入词库"}</button></div></div>
+          </>}
         </article>
       </section>
 
@@ -369,7 +456,7 @@ export default function Home() {
 
       <section className="review-banner" id="review">
         <div className="review-icon">↻</div><div><span>DAILY REVIEW</span><h2>今天还有 {Math.max(words.filter((w) => w.level !== "mastered").length, 0)} 个单词等待复习</h2><p>每天花 5 分钟，让记忆的线织得更牢。</p></div>
-        <button onClick={openReview}>开始今日复习 <b>→</b></button>
+        <button onClick={openReview} disabled={!words.some((word) => word.level !== "mastered")}>开始今日复习 <b>→</b></button>
       </section>
       <footer><span>拾词 WORD LOOM</span><p>把偶遇的单词，织成自己的语言。</p><small>每一次遇见，都值得被记住 ✦</small></footer>
     </main>
