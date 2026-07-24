@@ -20,7 +20,8 @@ type WordData = {
   addedAt?: string;
 };
 
-type ActivityStore = { dates: string[] };
+type ActivityEvent = { date: string; type: "collect" | "review" };
+type ActivityStore = { dates: string[]; events?: ActivityEvent[] };
 
 const irregular: Record<string, string> = {
   children: "child", men: "man", women: "woman", feet: "foot", teeth: "tooth",
@@ -63,6 +64,17 @@ function addDays(days: number) {
   const date = new Date();
   date.setDate(date.getDate() + days);
   return getLocalDate(date);
+}
+
+function dateFromToday(days: number) {
+  const date = new Date();
+  date.setDate(date.getDate() + days);
+  return getLocalDate(date);
+}
+
+function shortDate(date: string) {
+  const [, month, day] = date.split("-");
+  return `${Number(month)}/${Number(day)}`;
 }
 
 function countStreak(dates: string[]) {
@@ -197,11 +209,16 @@ export default function Home() {
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [reviewOpen]);
 
-  function recordActivity() {
+  function recordActivity(type: ActivityEvent["type"] = "review") {
     const today = getLocalDate();
-    const nextActivity = activity.dates.includes(today) ? activity : { dates: [...activity.dates, today].slice(-365) };
-    setActivity(nextActivity);
-    persistLocal(activityStorageKey, nextActivity);
+    setActivity((current) => {
+      const nextActivity = {
+        dates: current.dates.includes(today) ? current.dates : [...current.dates, today].slice(-365),
+        events: [...(current.events || []), { date: today, type }].slice(-1200),
+      };
+      persistLocal(activityStorageKey, nextActivity);
+      return nextActivity;
+    });
   }
 
   async function analyzeWord(value: string) {
@@ -278,7 +295,7 @@ export default function Home() {
       setToast(`已更新 ${analysis.lemma}`);
     } else {
       nextWords = [{ ...analysis, id: `${Date.now()}-${analysis.lemma}`, addedAt: new Date().toISOString(), reviewStage: 0, nextReviewOn: getLocalDate() }, ...words];
-      recordActivity();
+      recordActivity("collect");
       setToast(`已把 ${analysis.lemma} 收进词库`);
     }
     setWords(nextWords);
@@ -327,7 +344,13 @@ export default function Home() {
       words.forEach((word) => merged.set(word.lemma.toLowerCase(), word));
       const nextWords = Array.from(merged.values());
       const importedDates = Array.isArray(backup.activity?.dates) ? backup.activity.dates.filter((date: unknown) => typeof date === "string") : [];
-      const nextActivity = { dates: Array.from(new Set([...activity.dates, ...importedDates])).slice(-365) };
+      const importedEvents = Array.isArray(backup.activity?.events)
+        ? backup.activity.events.filter((event: ActivityEvent) => event && typeof event.date === "string" && ["collect", "review"].includes(event.type))
+        : [];
+      const nextActivity = {
+        dates: Array.from(new Set([...activity.dates, ...importedDates])).slice(-365),
+        events: [...(activity.events || []), ...importedEvents].slice(-1200),
+      };
       setWords(nextWords);
       setActivity(nextActivity);
       persistLocal(wordsStorageKey, nextWords);
@@ -343,7 +366,7 @@ export default function Home() {
     const nextWords = words.map((word) => word.id === id ? { ...word, level: word.level === "mastered" ? "learning" as const : "mastered" as const, reviewStage: word.level === "mastered" ? 0 : word.reviewStage, nextReviewOn: word.level === "mastered" ? getLocalDate() : word.nextReviewOn } : word);
     setWords(nextWords);
     persistLocal(wordsStorageKey, nextWords);
-    recordActivity();
+    recordActivity("review");
   }
 
   function removeWord(id: string) {
@@ -391,7 +414,7 @@ export default function Home() {
     });
     setWords(nextWords);
     persistLocal(wordsStorageKey, nextWords);
-    recordActivity();
+    recordActivity("review");
     if (reviewIndex >= reviewQueue.length - 1) {
       setReviewOpen(false);
       setToast("今日复习完成，做得好！");
@@ -427,6 +450,50 @@ export default function Home() {
   const masteredCount = words.filter((word) => word.level === "mastered").length;
   const favoriteCount = words.filter((word) => word.favorite).length;
   const masteryRate = words.length ? Math.round((masteredCount / words.length) * 100) : 0;
+  const learningCount = words.filter((word) => word.level === "learning").length;
+  const newCount = words.length - masteredCount - learningCount;
+  const stageSegments = [
+    { label: "新收录", value: newCount, color: "#c9cec6" },
+    { label: "学习中", value: learningCount, color: "#d99b65" },
+    { label: "已掌握", value: masteredCount, color: "#789a7c" },
+  ];
+  const stageStops = (() => {
+    if (!words.length) return "#e3e4de 0 100%";
+    let start = 0;
+    return stageSegments.map((segment) => {
+      const end = start + (segment.value / words.length) * 100;
+      const stop = `${segment.color} ${start}% ${end}%`;
+      start = end;
+      return stop;
+    }).join(", ");
+  })();
+  const activityDays = Array.from({ length: 14 }, (_, index) => {
+    const date = dateFromToday(index - 13);
+    const events = activity.events?.filter((event) => event.date === date) || [];
+    const legacyActive = activity.dates.includes(date);
+    return {
+      date,
+      count: events.length || (legacyActive ? 1 : 0),
+      collects: events.filter((event) => event.type === "collect").length,
+      reviews: events.filter((event) => event.type === "review").length,
+    };
+  });
+  const maxActivity = Math.max(1, ...activityDays.map((day) => day.count));
+  const reviewForecast = Array.from({ length: 7 }, (_, index) => {
+    const date = dateFromToday(index);
+    return {
+      date,
+      count: words.filter((word) => word.level !== "mastered" && (index === 0
+        ? (word.nextReviewOn || getLocalDate()) <= date
+        : word.nextReviewOn === date)).length,
+    };
+  });
+  const maxForecast = Math.max(1, ...reviewForecast.map((day) => day.count));
+  const categoryCounts = Object.entries(words.reduce<Record<string, number>>((counts, word) => {
+    counts[word.tag] = (counts[word.tag] || 0) + 1;
+    return counts;
+  }, {})).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const maxCategory = Math.max(1, ...categoryCounts.map(([, count]) => count));
 
   if (!hydrated) {
     return <main className="app-loading" aria-label="正在读取本地词库"><div className="loading-brand"><span className="brand-mark">拾</span><b>拾词</b></div><div className="loading-thread"><i /><i /><i /></div><p>正在打开你的本地词库…</p></main>;
@@ -518,6 +585,53 @@ export default function Home() {
           <div><span>重点词</span><b>{favoriteCount}</b><small>Favorites</small></div>
           <div className="mastery-stat"><span>掌握进度</span><b>{masteryRate}%</b><i><em style={{ width: `${masteryRate}%` }} /></i></div>
         </div>
+        <section className="insights" aria-labelledby="insights-title">
+          <div className="insights-heading">
+            <div><span className="eyebrow"><i /> LEARNING INSIGHTS</span><h3 id="insights-title">学习图谱</h3></div>
+            <p>图表来自这台设备上的学习记录</p>
+          </div>
+          <div className="insights-grid">
+            <article className="viz-card activity-viz">
+              <header><div><b>近 14 天节奏</b><span>每天的收词与复习次数</span></div><strong>{activityDays.reduce((sum, day) => sum + day.count, 0)}</strong></header>
+              <div className="activity-chart" role="img" aria-label={`近十四天共学习 ${activityDays.reduce((sum, day) => sum + day.count, 0)} 次`}>
+                {activityDays.map((day, index) => (
+                  <div className="activity-column" key={day.date}>
+                    <span className="bar-value">{day.count || ""}</span>
+                    <i style={{ height: `${day.count ? Math.max(12, (day.count / maxActivity) * 100) : 3}%` }} data-empty={!day.count} title={`${day.date}：${day.count} 次${day.collects || day.reviews ? `（收词 ${day.collects}，复习 ${day.reviews}）` : "（历史学习记录）"}`} />
+                    <small>{index % 3 === 1 || index === 13 ? shortDate(day.date) : ""}</small>
+                  </div>
+                ))}
+              </div>
+              <div className="viz-legend"><span><i className="legend-study" />学习行为</span><em>柱越高，当天练习越多</em></div>
+            </article>
+
+            <article className="viz-card stage-viz">
+              <header><div><b>记忆阶段</b><span>词库当前掌握构成</span></div></header>
+              <div className="donut-wrap">
+                <div className="donut" style={{ background: `conic-gradient(${stageStops})` }} role="img" aria-label={`新收录 ${newCount}，学习中 ${learningCount}，已掌握 ${masteredCount}`}>
+                  <span><b>{masteryRate}%</b><small>掌握率</small></span>
+                </div>
+                <div className="stage-legend">
+                  {stageSegments.map((segment) => <p key={segment.label}><i style={{ background: segment.color }} /><span>{segment.label}</span><b>{segment.value}</b></p>)}
+                </div>
+              </div>
+            </article>
+
+            <article className="viz-card forecast-viz">
+              <header><div><b>未来 7 天</b><span>计划中的复习负担</span></div><strong>{reviewForecast.reduce((sum, day) => sum + day.count, 0)}</strong></header>
+              <div className="forecast-chart" role="img" aria-label={`未来七天计划复习 ${reviewForecast.reduce((sum, day) => sum + day.count, 0)} 个单词`}>
+                {reviewForecast.map((day, index) => <div key={day.date}><b>{day.count}</b><span style={{ height: `${day.count ? Math.max(10, (day.count / maxForecast) * 100) : 2}%` }} title={`${day.date}：${day.count} 个`} /><small>{index === 0 ? "今天" : shortDate(day.date)}</small></div>)}
+              </div>
+            </article>
+
+            <article className="viz-card category-viz">
+              <header><div><b>分类分布</b><span>最常积累的内容方向</span></div></header>
+              {categoryCounts.length ? <div className="category-chart">
+                {categoryCounts.map(([tag, count]) => <div key={tag}><p><span>{tag}</span><b>{count}</b></p><i><em style={{ width: `${(count / maxCategory) * 100}%` }} /></i></div>)}
+              </div> : <div className="viz-empty">收进第一个单词后，这里会长出你的分类图谱。</div>}
+            </article>
+          </div>
+        </section>
         <div className="data-toolbar">
           <p>数据仅保存在当前浏览器，建议定期备份。</p>
           <div><button onClick={exportBackup}>⇩ 导出备份</button><button onClick={() => importRef.current?.click()}>⇧ 导入备份</button><input ref={importRef} type="file" accept="application/json,.json" onChange={importBackup} aria-label="选择拾词备份文件" /></div>
